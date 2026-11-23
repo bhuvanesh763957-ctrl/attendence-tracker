@@ -3,6 +3,7 @@
   "appId": "1:426272903331:web:4b578354bbccc14f222f16",
   "apiKey": "AIzaSyAPzY2sTVkCDnCi7BRYYrwT2TKosRRpzuw",
   "authDomain": "leafy-spider-hk4jk.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-attendancepro-0ab18c6d-4adc-455f-a5dc-7ac3553ab3cd",
   "storageBucket": "leafy-spider-hk4jk.firebasestorage.app",
   "messagingSenderId": "426272903331",
   "measurementId": "",
