@@ -1,12 +1,12 @@
 {
-  "projectId": "leafy-spider-hk4jk",
-  "appId": "1:426272903331:web:4b578354bbccc14f222f16",
-  "apiKey": "AIzaSyAPzY2sTVkCDnCi7BRYYrwT2TKosRRpzuw",
-  "authDomain": "leafy-spider-hk4jk.firebaseapp.com",
+  "projectId": "attendance-pro-25633",
+  "appId": "1:287046394923:web:6a5a0fe7e1d933d07df66e",
+  "apiKey": "AIzaSyAI_mw7TVxDLpZud128E6XWHUwlbifgDUg",
+  "authDomain": "attendance-pro-25633.firebaseapp.com",
   "firestoreDatabaseId": "ai-studio-attendancepro-0ab18c6d-4adc-455f-a5dc-7ac3553ab3cd",
-  "storageBucket": "leafy-spider-hk4jk.firebasestorage.app",
-  "messagingSenderId": "426272903331",
-  "measurementId": "",
+  "storageBucket": "attendance-pro-25633.firebasestorage.app",
+  "messagingSenderId": "287046394923",
+  "measurementId": "G-8NCY6M3FD3",
   "oAuthClientId": "426272903331-m2s7dbomk5l6id5af05fk914ldr72vgq.apps.googleusercontent.com",
   "recaptchaSiteKey": ""
 }
