@@ -1,7 +1,7 @@
 {
   "name": "Attendance Pro",
   "description": "Enterprise attendance tracking, leave management, shift policies, and workforce analytics powered by PostgreSQL.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": ["geolocation"],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]
