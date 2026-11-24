@@ -4,5 +4,16 @@
       "source": "/api/(.*)",
       "destination": "https://attendence-tracker-adgs.onrender.com/api/$1"
     }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "Permissions-Policy",
+          "value": "camera=(self), microphone=(), geolocation=(self)"
+        }
+      ]
+    }
   ]
 }
