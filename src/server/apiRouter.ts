@@ -50,6 +50,8 @@ import {
   updateAttendanceSchema,
   userRoleUpdateSchema,
 } from '../lib/validation.ts';
+import { validateGeoInput } from '../lib/geo.ts';
+import { normalizeQrToken } from '../lib/qr.ts';
 import {
   AuthRequest,
   isStaffSelfRole,
@@ -1079,6 +1081,7 @@ apiRouter.post('/attendance/check-in', async (req: AuthRequest, res) => {
       qrToken,
       latitude,
       longitude,
+      accuracyMeters,
       locationLabel,
       geoConsent,
       notes,
@@ -1118,17 +1121,21 @@ apiRouter.post('/attendance/check-in', async (req: AuthRequest, res) => {
       return res.status(403).json({ error: 'Work-From-Home check-in is disabled by attendance policy.' });
     }
 
+    let normalizedQrToken: string | null = null;
     if (checkMethod === 'QR') {
       if (policy && !policy.allowQrCheckIn) {
         return res.status(403).json({ error: 'QR attendance check-in is disabled by attendance policy.' });
       }
-      if (!qrToken?.trim()) {
-        return res.status(400).json({ error: 'A valid QR session token is required.' });
+      normalizedQrToken = normalizeQrToken(qrToken);
+      if (!normalizedQrToken) {
+        return res
+          .status(400)
+          .json({ error: 'Invalid QR code. Scan an active Attendance Tracker QR code.' });
       }
       const qrRows = await db
         .select()
         .from(qrSessions)
-        .where(eq(qrSessions.token, qrToken.trim()))
+        .where(eq(qrSessions.token, normalizedQrToken))
         .limit(1);
       if (qrRows.length === 0) {
         return res.status(400).json({ error: 'QR token was not recognized.' });
@@ -1136,16 +1143,35 @@ apiRouter.post('/attendance/check-in', async (req: AuthRequest, res) => {
       if (new Date(qrRows[0].expiresAt) < new Date()) {
         return res.status(400).json({ error: 'This QR check-in code has expired.' });
       }
+      if (qrRows[0].departmentId && emp.departmentId !== qrRows[0].departmentId) {
+        return res
+          .status(403)
+          .json({ error: 'This QR code is restricted to a different department.' });
+      }
     }
 
+    let normalizedLatitude: string | null = null;
+    let normalizedLongitude: string | null = null;
+    let capturedAccuracy: number | undefined;
     if (checkMethod === 'Geolocation') {
       if (policy?.requireGeoConsent && !geoConsent) {
         return res.status(400).json({ error: 'Explicit geolocation consent is required before recording coordinates.' });
       }
-      if (!latitude || !longitude) {
+      const geoResult = validateGeoInput({ latitude, longitude, accuracyMeters });
+      if (geoResult.error) {
+        return res.status(400).json({ error: geoResult.error });
+      }
+      normalizedLatitude = geoResult.value?.latitude ?? null;
+      normalizedLongitude = geoResult.value?.longitude ?? null;
+      capturedAccuracy = geoResult.value?.accuracyMeters;
+      if (!normalizedLatitude || !normalizedLongitude) {
         return res.status(400).json({ error: 'GPS coordinates are required for geolocation check-in.' });
       }
     }
+
+    const geoLocationLabel = normalizedLatitude && normalizedLongitude
+      ? `${normalizedLatitude}, ${normalizedLongitude}${capturedAccuracy !== undefined ? ` (${capturedAccuracy}m accuracy)` : ''}`
+      : null;
 
     const tz = policy?.timezone || DEFAULT_TIMEZONE;
     const today = todayStr(tz);
@@ -1190,14 +1216,14 @@ apiRouter.post('/attendance/check-in', async (req: AuthRequest, res) => {
               arrivalDelayMinutes,
               isLate,
               checkInMethod: checkMethod,
-              latitude: latitude ?? null,
-              longitude: longitude ?? null,
+              latitude: normalizedLatitude,
+              longitude: normalizedLongitude,
               locationLabel:
                 locationLabel ||
                 (checkMethod === 'WFH'
                   ? 'Remote Workspace'
                   : checkMethod === 'Geolocation'
-                    ? `${latitude}, ${longitude}`
+                    ? geoLocationLabel || 'Geolocation Verified'
                     : 'Web Portal'),
               anomalyFlag: policy?.autoAnomalyDetection ? anomalyFlag : null,
               notes: notes?.trim() ?? '',
@@ -1222,14 +1248,14 @@ apiRouter.post('/attendance/check-in', async (req: AuthRequest, res) => {
               isLate,
               isEarlyDeparture: false,
               checkInMethod: checkMethod,
-              latitude: latitude ?? null,
-              longitude: longitude ?? null,
+              latitude: normalizedLatitude,
+              longitude: normalizedLongitude,
               locationLabel:
                 locationLabel ||
                 (checkMethod === 'WFH'
                   ? 'Remote Workspace'
                   : checkMethod === 'Geolocation'
-                    ? `${latitude}, ${longitude}`
+                    ? geoLocationLabel || 'Geolocation Verified'
                     : 'Web Portal'),
               anomalyFlag: policy?.autoAnomalyDetection ? anomalyFlag : null,
               notes: notes?.trim() ?? '',
@@ -1252,7 +1278,16 @@ apiRouter.post('/attendance/check-in', async (req: AuthRequest, res) => {
       resourceType: 'attendance',
       resourceId: inserted[0].id,
       ipAddress: req.ip,
-      metadata: { employeeId: emp.id, method: checkMethod, status, arrivalDelayMinutes },
+      metadata: {
+        employeeId: emp.id,
+        method: checkMethod,
+        status,
+        arrivalDelayMinutes,
+        ...(checkMethod === 'QR' ? { qrToken: normalizedQrToken } : {}),
+        ...(checkMethod === 'Geolocation'
+          ? { latitude: normalizedLatitude, longitude: normalizedLongitude, accuracyMeters: capturedAccuracy }
+          : {}),
+      },
     });
 
     res.status(201).json({ record: inserted[0] });

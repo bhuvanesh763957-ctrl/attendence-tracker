@@ -1,4 +1,5 @@
 import {
+  Camera,
   Check,
   Clock,
   Coffee,
@@ -14,10 +15,13 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import jsQR from 'jsqr';
 import QRCode from 'qrcode';
-import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../context/AuthContext.tsx';
 import { apiFetch } from '../lib/api.ts';
+import { describeGeolocationError, readCurrentPosition } from '../lib/geo.ts';
+import { buildQrPayload, normalizeQrToken } from '../lib/qr.ts';
 import {
   AttendanceRecord,
   AttendanceStatus,
@@ -43,6 +47,27 @@ const ATTENDANCE_STATUSES: AttendanceStatus[] = [
   'Weekly Off',
   'Absent',
 ];
+
+function describeCameraError(error: unknown): string {
+  const name = (error as { name?: string } | null)?.name;
+  if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+    return 'Camera permission denied. Allow camera access in your browser settings, then try again.';
+  }
+  if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+    return 'No camera was found on this device. You can still enter the QR token manually.';
+  }
+  if (name === 'NotReadableError' || name === 'TrackStartError') {
+    return 'The camera is already in use by another app. Close it and try again.';
+  }
+  if (name === 'OverconstrainedError' || name === 'ConstraintNotSatisfiedError') {
+    return 'The camera does not support the requested video settings. Try again.';
+  }
+  if (name === 'SecurityError') {
+    return 'Camera access requires a secure HTTPS page. Open the site over HTTPS and try again.';
+  }
+  if (error instanceof Error && error.message) return `Camera access failed: ${error.message}`;
+  return 'Camera access failed. You can still enter the QR token manually.';
+}
 
 export function AttendanceView({ onNotify }: AttendanceViewProps) {
   const { dbUser, employee, policy } = useAuth();
@@ -73,6 +98,8 @@ export function AttendanceView({ onNotify }: AttendanceViewProps) {
   const [geoModalOpen, setGeoModalOpen] = useState(false);
   const [geoConsent, setGeoConsent] = useState(false);
   const [geoCoords, setGeoCoords] = useState<{ lat: string; lng: string } | null>(null);
+  const [geoAccuracy, setGeoAccuracy] = useState<number | null>(null);
+  const [geoError, setGeoError] = useState('');
   const [geoLoading, setGeoLoading] = useState(false);
 
   const [qrModalOpen, setQrModalOpen] = useState(false);
@@ -81,6 +108,14 @@ export function AttendanceView({ onNotify }: AttendanceViewProps) {
   const [qrValidMins, setQrValidMins] = useState(60);
   const [qrImageUrl, setQrImageUrl] = useState('');
   const [activeQrPreview, setActiveQrPreview] = useState<QrSession | null>(null);
+  const [qrCameraActive, setQrCameraActive] = useState(false);
+  const [qrCameraError, setQrCameraError] = useState('');
+
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+  const scanFrameRef = useRef<number | null>(null);
+  const scannerActiveRef = useRef(false);
 
   const [manualModalOpen, setManualModalOpen] = useState(false);
   const [manualForm, setManualForm] = useState({
@@ -157,13 +192,114 @@ export function AttendanceView({ onNotify }: AttendanceViewProps) {
 
   useEffect(() => {
     if (activeQrPreview) {
-      QRCode.toDataURL(activeQrPreview.token, { width: 220, margin: 2 })
+      QRCode.toDataURL(buildQrPayload(activeQrPreview.token), { width: 220, margin: 2 })
         .then(setQrImageUrl)
         .catch(() => setQrImageUrl(''));
     } else {
       setQrImageUrl('');
     }
   }, [activeQrPreview]);
+
+  const stopQrScanner = useCallback(() => {
+    scannerActiveRef.current = false;
+    if (scanFrameRef.current !== null) {
+      cancelAnimationFrame(scanFrameRef.current);
+      scanFrameRef.current = null;
+    }
+    const stream = cameraStreamRef.current;
+    if (stream) {
+      stream.getTracks().forEach((track) => track.stop());
+      cameraStreamRef.current = null;
+    }
+    if (videoRef.current) videoRef.current.srcObject = null;
+    setQrCameraActive(false);
+  }, []);
+
+  const startQrScanner = useCallback(async () => {
+    setQrCameraError('');
+    if (!navigator.mediaDevices?.getUserMedia) {
+      const message =
+        'Camera scanning is not available here. Use HTTPS or localhost and a supported browser, or enter the token manually.';
+      setQrCameraError(message);
+      onNotify(message, true);
+      return;
+    }
+
+    stopQrScanner();
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' } },
+        audio: false,
+      });
+      cameraStreamRef.current = stream;
+
+      const video = videoRef.current;
+      if (!video) throw new Error('Camera preview is not ready. Try opening the scanner again.');
+      video.srcObject = stream;
+      await video.play();
+
+      scannerActiveRef.current = true;
+      setQrCameraActive(true);
+
+      const scanFrame = () => {
+        if (!scannerActiveRef.current) return;
+
+        const videoEl = videoRef.current;
+        const canvas = canvasRef.current;
+        if (
+          videoEl &&
+          canvas &&
+          videoEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+          videoEl.videoWidth > 0 &&
+          videoEl.videoHeight > 0
+        ) {
+          const context = canvas.getContext('2d', { willReadFrequently: true });
+          if (context) {
+            canvas.width = videoEl.videoWidth;
+            canvas.height = videoEl.videoHeight;
+            context.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+            const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+            const decoded = jsQR(imageData.data, imageData.width, imageData.height, {
+              inversionAttempts: 'dontInvert',
+            });
+
+            if (decoded?.data) {
+              const token = normalizeQrToken(decoded.data);
+              if (token) {
+                setQrTokenInput(token);
+                const matchedSession = qrSessions.find((session) => session.token === token);
+                if (matchedSession) setActiveQrPreview(matchedSession);
+                stopQrScanner();
+                onNotify('QR code captured. Review and confirm check-in.');
+                return;
+              }
+              const invalidMessage =
+                'Scanned code is not a valid Attendance Tracker QR token. Try again.';
+              setQrCameraError((previous) =>
+                previous === invalidMessage ? previous : invalidMessage
+              );
+            }
+          }
+        }
+
+        scanFrameRef.current = requestAnimationFrame(scanFrame);
+      };
+
+      scanFrameRef.current = requestAnimationFrame(scanFrame);
+    } catch (err) {
+      stopQrScanner();
+      const message = describeCameraError(err);
+      setQrCameraError(message);
+      onNotify(message, true);
+    }
+  }, [onNotify, qrSessions, stopQrScanner]);
+
+  useEffect(() => {
+    if (!qrModalOpen) stopQrScanner();
+  }, [qrModalOpen, stopQrScanner]);
+
+  useEffect(() => () => stopQrScanner(), [stopQrScanner]);
 
   const filteredRecords = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -236,26 +372,60 @@ export function AttendanceView({ onNotify }: AttendanceViewProps) {
     }
   };
 
-  const handleCaptureLocation = () => {
-    if (!navigator.geolocation) {
-      onNotify('Geolocation is not supported by this browser.', true);
+  const handleCaptureLocation = async () => {
+    if (!geoConsent) {
+      const message = 'Provide explicit consent before capturing your location.';
+      setGeoError(message);
+      onNotify(message, true);
       return;
     }
+    if (!navigator.geolocation) {
+      const message = 'Geolocation is not supported by this browser.';
+      setGeoError(message);
+      onNotify(message, true);
+      return;
+    }
+    if (window.isSecureContext === false) {
+      const message = 'Geolocation requires HTTPS. Open this page over HTTPS and try again.';
+      setGeoError(message);
+      onNotify(message, true);
+      return;
+    }
+
+    setGeoError('');
     setGeoLoading(true);
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setGeoCoords({
-          lat: pos.coords.latitude.toFixed(5),
-          lng: pos.coords.longitude.toFixed(5),
+    try {
+      let position: GeolocationPosition;
+      try {
+        position = await readCurrentPosition({
+          enableHighAccuracy: true,
+          timeout: 15000,
+          maximumAge: 0,
         });
-        setGeoLoading(false);
-      },
-      (err) => {
-        setGeoLoading(false);
-        onNotify(err.message || 'Location access denied.', true);
-      },
-      { enableHighAccuracy: true, timeout: 10000 }
-    );
+      } catch (firstError) {
+        if ((firstError as { code?: number } | null)?.code !== 3) throw firstError;
+        position = await readCurrentPosition({
+          enableHighAccuracy: false,
+          timeout: 20000,
+          maximumAge: 60000,
+        });
+      }
+
+      setGeoCoords({
+        lat: position.coords.latitude.toFixed(6),
+        lng: position.coords.longitude.toFixed(6),
+      });
+      setGeoAccuracy(position.coords.accuracy);
+      onNotify(
+        `Location captured (accuracy ±${Math.round(position.coords.accuracy)}m).`
+      );
+    } catch (err) {
+      const message = describeGeolocationError(err);
+      setGeoError(message);
+      onNotify(message, true);
+    } finally {
+      setGeoLoading(false);
+    }
   };
 
   const handleGeoCheckInSubmit = async (e: FormEvent) => {
@@ -277,6 +447,7 @@ export function AttendanceView({ onNotify }: AttendanceViewProps) {
           method: 'Geolocation',
           latitude: geoCoords.lat,
           longitude: geoCoords.lng,
+          accuracyMeters: geoAccuracy ?? undefined,
           geoConsent: true,
         }),
       });
@@ -284,6 +455,8 @@ export function AttendanceView({ onNotify }: AttendanceViewProps) {
       setGeoModalOpen(false);
       setGeoConsent(false);
       setGeoCoords(null);
+      setGeoAccuracy(null);
+      setGeoError('');
       await loadData();
     } catch (err) {
       onNotify(err instanceof Error ? err.message : 'Geolocation check-in failed.', true);
@@ -312,10 +485,12 @@ export function AttendanceView({ onNotify }: AttendanceViewProps) {
 
   const handleQrCheckInSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!qrTokenInput.trim()) {
-      onNotify('Enter an active QR session token.', true);
+    const token = normalizeQrToken(qrTokenInput);
+    if (!token) {
+      onNotify('Invalid QR code. Scan an active Attendance Tracker QR code.', true);
       return;
     }
+    setQrTokenInput(token);
     setSubmitting(true);
     try {
       await apiFetch('/api/attendance/check-in', {
@@ -323,7 +498,7 @@ export function AttendanceView({ onNotify }: AttendanceViewProps) {
         body: JSON.stringify({
           employeeId: activeTargetId,
           method: 'QR',
-          qrToken: qrTokenInput.trim(),
+          qrToken: token,
         }),
       });
       onNotify('QR attendance verified and recorded.');
@@ -586,7 +761,13 @@ export function AttendanceView({ onNotify }: AttendanceViewProps) {
           <button
             type="button"
             disabled={submitting || Boolean(targetTodayRecord?.checkInTime)}
-            onClick={() => setGeoModalOpen(true)}
+            onClick={() => {
+              setGeoConsent(false);
+              setGeoError('');
+              setGeoCoords(null);
+              setGeoAccuracy(null);
+              setGeoModalOpen(true);
+            }}
             className="inline-flex min-h-[40px] items-center gap-2 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3.5 py-2 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-45 cursor-pointer whitespace-nowrap"
           >
             <MapPin aria-hidden="true" className="h-4 w-4 text-[#2563EB]" />
@@ -930,6 +1111,14 @@ export function AttendanceView({ onNotify }: AttendanceViewProps) {
         subtitle="Explicit consent is required before recording location coordinates."
       >
         <form onSubmit={handleGeoCheckInSubmit} className="space-y-4">
+          {geoError && (
+            <div
+              role="alert"
+              className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300"
+            >
+              {geoError}
+            </div>
+          )}
           <label className="flex items-start gap-3 rounded-md border border-slate-200 dark:border-slate-700 p-3.5 text-sm cursor-pointer">
             <input
               type="checkbox"
@@ -948,11 +1137,17 @@ export function AttendanceView({ onNotify }: AttendanceViewProps) {
               <p className="font-mono-tabular text-slate-500 dark:text-slate-400 mt-0.5">
                 {geoCoords ? `${geoCoords.lat}, ${geoCoords.lng}` : 'Not captured yet'}
               </p>
+              {geoAccuracy !== null && (
+                <p className="text-slate-500 dark:text-slate-400 mt-0.5">
+                  Accuracy: ±{Math.round(geoAccuracy)}m
+                </p>
+              )}
             </div>
             <button
               type="button"
-              disabled={geoLoading}
-              onClick={handleCaptureLocation}
+              disabled={geoLoading || !geoConsent}
+              title={!geoConsent ? 'Provide consent first' : undefined}
+              onClick={() => void handleCaptureLocation()}
               className="btn-press inline-flex min-h-[38px] items-center gap-1.5 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-700 cursor-pointer"
             >
               <MapPin aria-hidden="true" className="h-3.5 w-3.5 text-[#2563EB]" />
@@ -1064,6 +1259,57 @@ export function AttendanceView({ onNotify }: AttendanceViewProps) {
                 placeholder="e.g. APQR-8F3A12B4C901"
                 className="w-full min-h-[40px] rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-sm font-mono-tabular"
               />
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={submitting || qrCameraActive}
+                  onClick={() => void startQrScanner()}
+                  className="inline-flex min-h-[38px] items-center gap-2 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50 cursor-pointer"
+                >
+                  <Camera aria-hidden="true" className="h-3.5 w-3.5 text-[#2563EB]" />
+                  <span>Scan with Camera</span>
+                </button>
+                {qrCameraActive && (
+                  <button
+                    type="button"
+                    onClick={stopQrScanner}
+                    className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md border border-slate-200 dark:border-slate-700 px-3 py-1.5 text-xs font-medium hover:bg-slate-50 dark:hover:bg-slate-700 cursor-pointer"
+                  >
+                    <X aria-hidden="true" className="h-3.5 w-3.5" />
+                    <span>Stop Camera</span>
+                  </button>
+                )}
+              </div>
+
+              {qrCameraError && (
+                <div
+                  role="alert"
+                  className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300"
+                >
+                  {qrCameraError}
+                </div>
+              )}
+
+              <video
+                ref={videoRef}
+                playsInline
+                muted
+                autoPlay
+                className={
+                  qrCameraActive
+                    ? 'block w-full rounded-md border border-slate-200 dark:border-slate-700 bg-black'
+                    : 'hidden'
+                }
+              />
+              <canvas ref={canvasRef} className="hidden" />
+              {qrCameraActive && (
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Point your camera at an Attendance Tracker QR code. Scanning stops automatically when a valid code is detected.
+                </p>
+              )}
             </div>
 
             {qrSessions.length > 0 && (

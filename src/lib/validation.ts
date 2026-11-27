@@ -70,6 +70,7 @@ export const checkInSchema = z.object({
   qrToken: z.string().trim().max(120).optional(),
   latitude: z.string().trim().max(40).optional(),
   longitude: z.string().trim().max(40).optional(),
+  accuracyMeters: z.number().min(0).max(100000).optional(),
   locationLabel: z.string().trim().max(180).optional(),
   geoConsent: z.boolean().optional(),
   notes: z.string().trim().max(500).optional(),

@@ -16,8 +16,18 @@ const __dirname = path.dirname(__filename);
 
 function isAllowedOrigin(origin: string | undefined): boolean {
   if (!origin) return true; // Same-origin or curl/server-to-server
+
   const appUrl = process.env.APP_URL?.trim();
   if (appUrl && origin === appUrl) return true;
+
+  const configuredOrigins = new Set(
+    (process.env.CORS_ORIGINS || '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean)
+  );
+  if (configuredOrigins.has(origin)) return true;
+
   try {
     const url = new URL(origin);
     if (
@@ -25,7 +35,8 @@ function isAllowedOrigin(origin: string | undefined): boolean {
       url.hostname === '127.0.0.1' ||
       url.hostname.endsWith('.run.app') ||
       url.hostname.endsWith('.googleusercontent.com') ||
-      url.hostname.endsWith('.google.com')
+      url.hostname.endsWith('.google.com') ||
+      url.hostname.endsWith('.vercel.app')
     ) {
       return true;
     }

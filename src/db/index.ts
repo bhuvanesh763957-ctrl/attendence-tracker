@@ -6,6 +6,17 @@ declare global {
   var _postgresPool: Pool | undefined;
 }
 
+function shouldUseSsl(host: string | undefined): boolean {
+  if (!host) return false;
+  const normalized = host.toLowerCase();
+  const isLocal =
+    normalized === 'localhost' ||
+    normalized === '127.0.0.1' ||
+    normalized === '::1' ||
+    normalized === 'host.docker.internal';
+  return !isLocal && process.env.PGSSLMODE !== 'disable';
+}
+
 export const createPool = () => {
   if (!global._postgresPool) {
     global._postgresPool = new Pool({
@@ -15,6 +26,7 @@ export const createPool = () => {
       database: process.env.SQL_DB_NAME,
       max: 10,
       connectionTimeoutMillis: 15000,
+      ssl: shouldUseSsl(process.env.SQL_HOST) ? { rejectUnauthorized: false } : false,
     });
 
     global._postgresPool.on('error', (err) => {

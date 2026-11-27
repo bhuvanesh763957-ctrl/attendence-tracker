@@ -1,7 +1,4 @@
 import { defineConfig } from 'drizzle-kit';
-import * as dotenv from 'dotenv';
-
-dotenv.config();
 
 const sqlHost = process.env.SQL_HOST;
 const sqlDbName = process.env.SQL_DB_NAME;
@@ -22,7 +19,6 @@ export default defineConfig({
     user,
     password,
     database: sqlDbName,
-    ssl: false,
+    ssl: true,
   },
-  verbose: true,
 });
